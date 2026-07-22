@@ -1,0 +1,309 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  ADMIN
+  AGENT
+  CUSTOMER
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum MaritalStatus {
+  SINGLE
+  MARRIED
+  DIVORCED
+  WIDOWED
+}
+
+enum PolicyStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  SUSPENDED
+  PENDING
+  RENEWED
+}
+
+enum ClaimStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  CLOSED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  UPI
+  CARD
+  CHEQUE
+  ONLINE
+}
+
+enum DocumentType {
+  ID_PROOF
+  ADDRESS_PROOF
+  MEDICAL_REPORT
+  CLAIM_DOCUMENT
+  POLICY_DOCUMENT
+  PHOTO
+  SIGNATURE
+  OTHER
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  VIEW
+}
+
+// ============================================================
+// USER MODEL
+// ============================================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  password     String
+  firstName    String
+  lastName     String
+  phone        String?
+  role         Role     @default(CUSTOMER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  lastLoginAt  DateTime?
+
+  // Relations
+  customer     Customer?
+  auditLogs    AuditLog[]
+
+  @@index([email])
+  @@index([role])
+}
+
+// ============================================================
+// CUSTOMER MODEL
+// ============================================================
+
+model Customer {
+  id              String        @id @default(cuid())
+  userId          String        @unique
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Personal Info
+  dateOfBirth     DateTime?
+  gender          Gender?
+  maritalStatus   MaritalStatus?
+  occupation      String?
+  annualIncome    Decimal?      @db.Decimal(12, 2)
+
+  // Address
+  addressLine1    String?
+  addressLine2    String?
+  city            String?
+  state           String?
+  zipCode         String?
+  country         String        @default("India")
+
+  // Additional Info
+  nomineeName     String?
+  nomineeRelation String?
+  agentNotes      String?       // Notes added by agent
+
+  // Agent who created this customer (optional - for self-registered, this is null)
+  createdById     String?
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relations
+  policies        Policy[]
+  documents       Document[]
+
+  @@index([userId])
+  @@index([createdById])
+}
+
+// ============================================================
+// POLICY MODEL
+// ============================================================
+
+model Policy {
+  id                String        @id @default(cuid())
+  customerId        String
+  customer          Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  // Policy Details
+  policyNumber      String        @unique
+  policyType        String        // e.g., "Life Insurance", "Health Insurance", "Vehicle Insurance"
+  sumAssured        Decimal       @db.Decimal(12, 2)
+  premiumAmount     Decimal       @db.Decimal(10, 2)
+  premiumFrequency  String        @default("ANNUAL") // MONTHLY, QUARTERLY, HALF_YEARLY, ANNUAL
+
+  // Tenure
+  startDate         DateTime
+  endDate           DateTime
+  tenureYears       Int
+
+  // Status & Info
+  status            PolicyStatus  @default(PENDING)
+  description       String?
+
+  // Agent who issued
+  issuedById        String
+
+  // Dates
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  // Relations
+  claims            Claim[]
+  premiumPayments   PremiumPayment[]
+
+  @@index([customerId])
+  @@index([policyNumber])
+  @@index([status])
+  @@index([issuedById])
+}
+
+// ============================================================
+// CLAIM MODEL
+// ============================================================
+
+model Claim {
+  id              String      @id @default(cuid())
+  policyId        String
+  policy          Policy      @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  claimNumber     String      @unique
+  claimType      String      // e.g., "Death Claim", "Maturity Claim", "Partial Withdrawal"
+  claimAmount    Decimal     @db.Decimal(12, 2)
+  claimReason    String
+  incidentDate   DateTime?
+  status         ClaimStatus @default(SUBMITTED)
+
+  // Review Info
+  reviewedById   String?
+  reviewedAt     DateTime?
+  reviewNotes    String?
+
+  // Settlement
+  approvedAmount  Decimal?    @db.Decimal(12, 2)
+  settledAt       DateTime?
+
+  // Dates
+  submittedAt    DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([policyId])
+  @@index([claimNumber])
+  @@index([status])
+}
+
+// ============================================================
+// PREMIUM PAYMENT MODEL
+// ============================================================
+
+model PremiumPayment {
+  id              String         @id @default(cuid())
+  policyId        String
+  policy          Policy         @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  receiptNumber   String         @unique
+  amount          Decimal        @db.Decimal(10, 2)
+  paymentDate     DateTime
+  dueDate         DateTime
+  paymentMethod   PaymentMethod
+  status          PaymentStatus  @default(PENDING)
+
+  // Transaction Ref
+  transactionRef  String?
+  remarks         String?
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([policyId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+// ============================================================
+// DOCUMENT MODEL
+// ============================================================
+
+model Document {
+  id            String       @id @default(cuid())
+  customerId    String
+  customer      Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  fileName      String
+  originalName  String
+  fileType      String
+  fileSize      Int
+  mimeType      String
+  url           String       // Supabase Storage URL
+  storagePath   String       // Supabase Storage path
+
+  documentType  DocumentType @default(OTHER)
+  description   String?
+  isVerified    Boolean      @default(false)
+
+  uploadedById  String
+  uploadedAt    DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([customerId])
+  @@index([documentType])
+}
+
+// ============================================================
+// AUDIT LOG MODEL
+// ============================================================
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  action      AuditAction
+  entityType  String      // e.g., "Customer", "Policy", "Claim"
+  entityId    String?
+  description String?
+  ipAddress   String?
+  userAgent   String?
+
+  createdAt   DateTime    @default(now())
+
+  @@index([userId])
+  @@index([entityType])
+  @@index([createdAt])
+}
