@@ -35,7 +35,7 @@ export const customerService = {
     const { page = 1, limit = 10, search = '', createdById } = filters;
     const supabase = getSupabase();
 
-    let query = supabase.from('Customer').select('*, user:User(id, email, firstName, lastName, phone, role, createdAt), _count:policies(count)', { count: 'exact' });
+    let query = supabase.from('Customer').select('*, user:User(id, email, firstName, lastName, phone, role, createdAt)', { count: 'exact' });
 
     if (createdById) {
       query = query.eq('createdById', createdById);
@@ -65,7 +65,7 @@ export const customerService = {
     const supabase = getSupabase();
     const { data, error } = await supabase
       .from('Customer')
-      .select('*, user:User(id, email, firstName, lastName, phone, role, createdAt), policies(*), documents(*)')
+      .select('*, user:User(id, email, firstName, lastName, phone, role, createdAt)')
       .eq('userId', userId)
       .single();
 
@@ -77,7 +77,7 @@ export const customerService = {
     const supabase = getSupabase();
     const { data, error } = await supabase
       .from('Customer')
-      .select('*, user:User(id, email, firstName, lastName, phone, role, createdAt), policies(*), documents(*)')
+      .select('*, user:User(id, email, firstName, lastName, phone, role, createdAt)')
       .eq('id', id)
       .single();
 
