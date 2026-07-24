@@ -30,15 +30,19 @@ router.post(
 // Login
 router.post(
   '/login',
-  validate([
-    body('email').isEmail().normalizeEmail(),
-    body('password').notEmpty(),
-  ]),
   async (req, res) => {
     try {
-      const result = await authService.login(req.body);
+      const { email, password } = req.body;
+
+      if (!email || !password) {
+        res.status(400).json({ success: false, error: 'Email and password are required' });
+        return;
+      }
+
+      const result = await authService.login({ email, password });
       res.json({ success: true, data: result });
     } catch (error: any) {
+      console.error('Login error:', error.message);
       res.status(401).json({ success: false, error: error.message });
     }
   }

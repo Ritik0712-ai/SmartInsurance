@@ -2,7 +2,14 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { query, queryOne, insert, update } from '../config/database.js';
 import { JwtPayload } from '../types/index.js';
-import { emailService } from './email.service.js';
+
+// Email service - lazy loaded to avoid startup issues
+let emailService: any = null;
+try {
+  emailService = require('./email.service.js');
+} catch (e) {
+  console.warn('Email service not available');
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'fallback-refresh-secret';
@@ -75,40 +82,47 @@ export const authService = {
     }
     const tokens = this.generateTokens(fullUser);
 
-    // Send welcome email (async, don't wait)
-    emailService.sendWelcomeEmail(fullUser.email, fullUser.firstName, fullUser.role).catch(console.error);
+    // Send welcome email (async, don't wait) - safely handle if email service unavailable
+    if (emailService?.sendWelcomeEmail) {
+      emailService.sendWelcomeEmail(fullUser.email, fullUser.firstName, fullUser.role).catch(console.error);
+    }
 
     return { user: fullUser, ...tokens };
   },
 
   async login(data: LoginData) {
-    const user = await queryOne<User>('User', { eq: { email: data.email } });
+    try {
+      const user = await queryOne<User>('User', { eq: { email: data.email } });
 
-    if (!user) {
-      throw new Error('Invalid credentials');
+      if (!user) {
+        throw new Error('Invalid credentials');
+      }
+
+      if (!user.isActive) {
+        throw new Error('Account is deactivated');
+      }
+
+      const isValid = await bcrypt.compare(data.password, user.password);
+      if (!isValid) {
+        throw new Error('Invalid credentials');
+      }
+
+      await update('User', user.id, { lastLoginAt: new Date().toISOString() });
+
+      await insert('AuditLog', {
+        userId: user.id,
+        action: 'LOGIN',
+        entityType: 'User',
+        entityId: user.id,
+        description: 'User logged in',
+      });
+
+      const tokens = this.generateTokens(user);
+      return { user, ...tokens };
+    } catch (error: any) {
+      console.error('Auth service login error:', error.message);
+      throw error;
     }
-
-    if (!user.isActive) {
-      throw new Error('Account is deactivated');
-    }
-
-    const isValid = await bcrypt.compare(data.password, user.password);
-    if (!isValid) {
-      throw new Error('Invalid credentials');
-    }
-
-    await update('User', user.id, { lastLoginAt: new Date().toISOString() });
-
-    await insert('AuditLog', {
-      userId: user.id,
-      action: 'LOGIN',
-      entityType: 'User',
-      entityId: user.id,
-      description: 'User logged in',
-    });
-
-    const tokens = this.generateTokens(user);
-    return { user, ...tokens };
   },
 
   async refreshToken(refreshToken: string) {
@@ -176,8 +190,10 @@ export const authService = {
     const hashedPassword = await bcrypt.hash(newPassword, 12);
     await update('User', userId, { password: hashedPassword });
 
-    // Send password change notification email
-    emailService.sendPasswordChangedEmail(user.email, user.firstName).catch(console.error);
+    // Send password change notification email (safely)
+    if (emailService?.sendPasswordChangedEmail) {
+      emailService.sendPasswordChangedEmail(user.email, user.firstName).catch(console.error);
+    }
 
     return { message: 'Password changed successfully' };
   },
