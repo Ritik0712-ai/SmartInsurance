@@ -1,5 +1,12 @@
 import { getSupabase } from '../config/database.js';
-import { emailService } from './email.service.js';
+
+// Email service - lazy loaded
+let emailService: any = null;
+try {
+  emailService = require('./email.service.js');
+} catch (e) {
+  console.warn('Email service not available');
+}
 
 export const documentService = {
   async getAll(filters: any = {}) {
@@ -51,14 +58,17 @@ export const documentService = {
       .from('Document')
       .insert({
         customerId: data.customerId,
-        documentType: data.documentType,
-        fileName: data.fileName,
-        fileUrl: data.fileUrl || null,
-        fileSize: data.fileSize || null,
-        mimeType: data.mimeType || null,
+        documentType: data.documentType || 'OTHER',
+        fileName: data.fileName || data.originalName || 'Untitled',
+        originalName: data.originalName || data.fileName || 'Untitled',
+        fileType: data.fileType || data.mimeType || 'application/octet-stream',
+        fileSize: data.fileSize || 0,
+        mimeType: data.mimeType || data.fileType || 'application/octet-stream',
+        url: data.url || data.fileUrl || '',
+        storagePath: data.storagePath || '',
         description: data.description || null,
         uploadedById: data.uploadedById,
-        verificationStatus: 'PENDING',
+        isVerified: false,
       })
       .select()
       .single();
@@ -67,16 +77,11 @@ export const documentService = {
     return document;
   },
 
-  async verify(id: string, verifiedById: string, status: string) {
+  async updateVerificationStatus(id: string, status: 'VERIFIED' | 'REJECTED') {
     const supabase = getSupabase();
-
     const { data, error } = await supabase
       .from('Document')
-      .update({
-        verificationStatus: status,
-        verifiedById,
-        verifiedAt: new Date().toISOString(),
-      })
+      .update({ isVerified: status === 'VERIFIED' })
       .eq('id', id)
       .select()
       .single();
@@ -84,7 +89,7 @@ export const documentService = {
     if (error) throw new Error(error.message);
 
     // Send email notification if verified
-    if (status === 'VERIFIED') {
+    if (status === 'VERIFIED' && emailService?.sendDocumentVerifiedEmail) {
       const { data: docWithCustomer } = await supabase
         .from('Document')
         .select('*, customer:Customer(user:User(email, firstName, lastName))')
@@ -105,7 +110,7 @@ export const documentService = {
           userName || 'Customer',
           {
             documentType: documentTypeName,
-            fileName: docWithCustomer?.fileName || 'Document',
+            fileName: docWithCustomer?.originalName || docWithCustomer?.fileName || 'Document',
           }
         ).catch(console.error);
       }
