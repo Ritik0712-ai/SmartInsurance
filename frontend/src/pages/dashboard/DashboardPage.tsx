@@ -21,20 +21,28 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
 
 export default function DashboardPage() {
   const { user } = useAuth();
+  const isCustomer = user?.role === 'CUSTOMER';
 
   const { data: overview, isLoading } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: () => dashboardApi.getOverview().then((res) => res.data.data),
+    queryKey: ['dashboard', user?.role],
+    queryFn: () => {
+      if (isCustomer) {
+        return dashboardApi.getCustomerDashboard().then((res) => res.data.data);
+      }
+      return dashboardApi.getOverview().then((res) => res.data.data);
+    },
   });
 
   const { data: revenueData } = useQuery({
     queryKey: ['revenue'],
     queryFn: () => dashboardApi.getRevenue().then((res) => res.data.data),
+    enabled: !isCustomer,
   });
 
   const { data: policyDistribution } = useQuery({
     queryKey: ['policyDistribution'],
     queryFn: () => dashboardApi.getPolicyDistribution().then((res) => res.data.data),
+    enabled: !isCustomer,
   });
 
   if (isLoading) {
@@ -45,12 +53,18 @@ export default function DashboardPage() {
     );
   }
 
-  const stats = overview?.stats || {
+  // Handle both admin and customer dashboard data
+  const stats = isCustomer ? {
+    totalCustomers: 0,
+    activePolicies: overview?.totalPolicies || 0,
+    pendingClaims: overview?.totalClaims || 0,
+    overduePayments: 0,
+  } : (overview?.stats || {
     totalCustomers: 0,
     activePolicies: 0,
     pendingClaims: 0,
     overduePayments: 0,
-  };
+  });
 
   return (
     <div className="space-y-6">

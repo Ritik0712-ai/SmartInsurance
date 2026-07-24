@@ -73,38 +73,41 @@ router.get('/:id', authenticate, async (req: any, res) => {
 // Upload document with file
 router.post('/', authenticate, upload.single('file'), async (req: any, res) => {
   try {
-    const customerId = req.body.customerId;
+    let customerId = req.body.customerId;
 
-    // For CUSTOMER role, get their customerId
+    // For CUSTOMER role, automatically get their customerId
     if (req.user.role === 'CUSTOMER') {
-      const custId = await getCustomerIdFromUserId(req.user.userId);
-      if (!custId) {
+      customerId = await getCustomerIdFromUserId(req.user.userId);
+      if (!customerId) {
         res.status(404).json({ success: false, error: 'Customer profile not found' });
         return;
       }
-      // Override customerId with their own
-      req.body.customerId = custId;
     }
 
-    if (!customerId && req.user.role === 'CUSTOMER') {
-      res.status(400).json({ success: false, error: 'Customer ID required' });
-      return;
+    // ADMIN/AGENT can upload without customerId (will be stored with their userId as fallback)
+    if (!customerId) {
+      customerId = req.user.userId;
     }
 
     let fileUrl = null;
 
     // Upload file to Supabase Storage if file provided
     if (req.file) {
-      const uploadResult = await storageService.uploadDocument(
-        req.file.buffer,
-        req.file.originalname,
-        req.body.customerId
-      );
-      fileUrl = uploadResult.url;
+      try {
+        const uploadResult = await storageService.uploadDocument(
+          req.file.buffer,
+          req.file.originalname,
+          customerId
+        );
+        fileUrl = uploadResult.url;
+      } catch (storageError: any) {
+        // Storage might not be configured - continue without file URL
+        console.error('Storage upload failed:', storageError.message);
+      }
     }
 
     const doc = await documentService.create({
-      customerId: req.body.customerId,
+      customerId,
       documentType: req.body.documentType,
       fileName: req.file?.originalname || req.body.fileName,
       fileUrl: fileUrl,
@@ -114,8 +117,9 @@ router.post('/', authenticate, upload.single('file'), async (req: any, res) => {
       uploadedById: req.user.userId,
     });
 
-    res.json({ success: true, data: doc });
+    res.status(201).json({ success: true, data: doc });
   } catch (error: any) {
+    console.error('Upload error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -133,51 +137,34 @@ router.patch('/:id/verify', authenticate, async (req: any, res) => {
 // Delete document
 router.delete('/:id', authenticate, async (req: any, res) => {
   try {
-    // Get document to check if it has a file
     const doc = await documentService.getById(req.params.id);
 
     // Delete file from storage if exists
-    if (doc.fileUrl) {
+    if (doc?.fileUrl) {
       try {
-        // Extract path from URL (simplified - in production use proper URL parsing)
-        const urlParts = doc.fileUrl.split('/documents/');
-        if (urlParts.length > 1) {
-          await storageService.deleteDocument(urlParts[1]);
+        const pathMatch = doc.fileUrl.match(/\/storage\/v1\/object\/public\/(.+)$/);
+        if (pathMatch) {
+          await storageService.deleteDocument(pathMatch[1]);
         }
-      } catch {
-        // Continue even if file deletion fails
-        console.error('Failed to delete file from storage');
+      } catch (storageError: any) {
+        console.error('Storage delete failed:', storageError.message);
       }
     }
 
     await documentService.delete(req.params.id);
-    res.json({ success: true, message: 'Document deleted' });
+    res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Get document download URL
+// Get download URL
 router.get('/:id/download', authenticate, async (req: any, res) => {
   try {
     const doc = await documentService.getById(req.params.id);
-
-    if (!doc.fileUrl) {
-      res.status(404).json({ success: false, error: 'No file associated with this document' });
-      return;
-    }
-
-    // For public buckets, return the URL directly
-    // For private buckets, generate a signed URL
-    res.json({
-      success: true,
-      data: {
-        url: doc.fileUrl,
-        fileName: doc.fileName,
-      },
-    });
+    res.json({ success: true, data: { url: doc?.fileUrl } });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(404).json({ success: false, error: error.message });
   }
 });
 
