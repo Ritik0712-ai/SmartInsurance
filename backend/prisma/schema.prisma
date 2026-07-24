@@ -89,7 +89,7 @@ enum AuditAction {
 // ============================================================
 
 model User {
-  id           String   @id @default(cuid())
+  id           String   @id @default(uuid())
   email        String   @unique
   password     String
   firstName    String
@@ -114,7 +114,7 @@ model User {
 // ============================================================
 
 model Customer {
-  id              String        @id @default(cuid())
+  id              String        @id @default(uuid())
   userId          String        @unique
   user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -157,7 +157,7 @@ model Customer {
 // ============================================================
 
 model Policy {
-  id                String        @id @default(cuid())
+  id                String        @id @default(uuid())
   customerId        String
   customer          Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
@@ -199,7 +199,7 @@ model Policy {
 // ============================================================
 
 model Claim {
-  id              String      @id @default(cuid())
+  id              String      @id @default(uuid())
   policyId        String
   policy          Policy      @relation(fields: [policyId], references: [id], onDelete: Cascade)
 
@@ -233,7 +233,7 @@ model Claim {
 // ============================================================
 
 model PremiumPayment {
-  id              String         @id @default(cuid())
+  id              String         @id @default(uuid())
   policyId        String
   policy          Policy         @relation(fields: [policyId], references: [id], onDelete: Cascade)
 
@@ -261,7 +261,7 @@ model PremiumPayment {
 // ============================================================
 
 model Document {
-  id            String       @id @default(cuid())
+  id            String       @id @default(uuid())
   customerId    String
   customer      Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
@@ -290,7 +290,7 @@ model Document {
 // ============================================================
 
 model AuditLog {
-  id          String      @id @default(cuid())
+  id          String      @id @default(uuid())
   userId      String
   user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 

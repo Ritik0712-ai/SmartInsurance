@@ -21,7 +21,14 @@ router.get('/customer', authenticate, async (req: any, res) => {
       res.status(403).json({ success: false, error: 'Not a customer' });
       return;
     }
-    const overview = await dashboardService.getCustomerOverview(req.user.userId);
+    // Convert userId to customerId
+    const { getCustomerIdFromUserId } = await import('../utils/helpers.js');
+    const customerId = await getCustomerIdFromUserId(req.user.userId);
+    if (!customerId) {
+      res.status(404).json({ success: false, error: 'Customer profile not found' });
+      return;
+    }
+    const overview = await dashboardService.getCustomerOverview(customerId);
     res.json({ success: true, data: overview });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -31,11 +38,7 @@ router.get('/customer', authenticate, async (req: any, res) => {
 // Get revenue data
 router.get('/revenue', authenticate, authorize('ADMIN', 'AGENT'), async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
-    const data = await dashboardService.getRevenueData(
-      startDate ? new Date(startDate as string) : undefined,
-      endDate ? new Date(endDate as string) : undefined
-    );
+    const data = await dashboardService.getRevenueData();
     res.json({ success: true, data });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -52,22 +55,11 @@ router.get('/policy-distribution', authenticate, authorize('ADMIN', 'AGENT'), as
   }
 });
 
-// Get claim statistics
-router.get('/claim-statistics', authenticate, authorize('ADMIN', 'AGENT'), async (req, res) => {
+// Get claims trend
+router.get('/claims-trend', authenticate, authorize('ADMIN', 'AGENT'), async (req, res) => {
   try {
-    const data = await dashboardService.getClaimStatistics();
+    const data = await dashboardService.getClaimsTrend();
     res.json({ success: true, data });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get expiring policies
-router.get('/expiring-policies', authenticate, authorize('ADMIN', 'AGENT'), async (req, res) => {
-  try {
-    const days = parseInt(req.query.days as string) || 30;
-    const policies = await dashboardService.getExpiringPolicies(days);
-    res.json({ success: true, data: policies });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

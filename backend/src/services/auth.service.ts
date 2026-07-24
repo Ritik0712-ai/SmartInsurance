@@ -1,7 +1,8 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import prisma from '../config/prisma.js';
+import { query, queryOne, insert, update } from '../config/database.js';
 import { JwtPayload } from '../types/index.js';
+import { emailService } from './email.service.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'fallback-refresh-secret';
@@ -20,9 +21,21 @@ interface LoginData {
   password: string;
 }
 
+interface User {
+  id: string;
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  role: string;
+  isActive: boolean;
+  customer?: any;
+}
+
 export const authService = {
   async register(data: RegisterData, createdById?: string) {
-    const existing = await prisma.user.findUnique({ where: { email: data.email } });
+    const existing = await queryOne<User>('User', { eq: { email: data.email } });
     if (existing) {
       throw new Error('Email already registered');
     }
@@ -30,45 +43,46 @@ export const authService = {
     const hashedPassword = await bcrypt.hash(data.password, 12);
     const role = data.role || 'CUSTOMER';
 
-    const user = await prisma.user.create({
-      data: {
-        email: data.email,
-        password: hashedPassword,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        phone: data.phone,
-        role,
-        customer: role === 'CUSTOMER' ? {
-          create: {
-            createdById: createdById || null,
-          },
-        } : undefined,
-      },
-      include: {
-        customer: true,
-      },
+    const user = await insert('User', {
+      email: data.email,
+      password: hashedPassword,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      phone: data.phone || null,
+      role,
+      isActive: true,
     });
 
-    // Create audit log
-    await prisma.auditLog.create({
-      data: {
+    if (role === 'CUSTOMER') {
+      await insert('Customer', {
         userId: user.id,
-        action: 'CREATE',
-        entityType: 'User',
-        entityId: user.id,
-        description: `User registered with role: ${role}`,
-      },
+        createdById: createdById || null,
+        country: 'India',
+      });
+    }
+
+    await insert('AuditLog', {
+      userId: user.id,
+      action: 'CREATE',
+      entityType: 'User',
+      entityId: user.id,
+      description: `User registered with role: ${role}`,
     });
 
-    const tokens = this.generateTokens(user);
-    return { user, ...tokens };
+    const fullUser = await queryOne<User>('User', { eq: { id: user.id } });
+    if (!fullUser) {
+      throw new Error('Failed to create user');
+    }
+    const tokens = this.generateTokens(fullUser);
+
+    // Send welcome email (async, don't wait)
+    emailService.sendWelcomeEmail(fullUser.email, fullUser.firstName, fullUser.role).catch(console.error);
+
+    return { user: fullUser, ...tokens };
   },
 
   async login(data: LoginData) {
-    const user = await prisma.user.findUnique({
-      where: { email: data.email },
-      include: { customer: true },
-    });
+    const user = await queryOne<User>('User', { eq: { email: data.email } });
 
     if (!user) {
       throw new Error('Invalid credentials');
@@ -83,21 +97,14 @@ export const authService = {
       throw new Error('Invalid credentials');
     }
 
-    // Update last login
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() },
-    });
+    await update('User', user.id, { lastLoginAt: new Date().toISOString() });
 
-    // Audit log
-    await prisma.auditLog.create({
-      data: {
-        userId: user.id,
-        action: 'LOGIN',
-        entityType: 'User',
-        entityId: user.id,
-        description: 'User logged in',
-      },
+    await insert('AuditLog', {
+      userId: user.id,
+      action: 'LOGIN',
+      entityType: 'User',
+      entityId: user.id,
+      description: 'User logged in',
     });
 
     const tokens = this.generateTokens(user);
@@ -107,10 +114,7 @@ export const authService = {
   async refreshToken(refreshToken: string) {
     try {
       const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as JwtPayload;
-      const user = await prisma.user.findUnique({
-        where: { id: decoded.userId },
-        include: { customer: true },
-      });
+      const user = await queryOne<User>('User', { eq: { id: decoded.userId } });
 
       if (!user || !user.isActive) {
         throw new Error('Invalid refresh token');
@@ -136,55 +140,44 @@ export const authService = {
   },
 
   async getProfile(userId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { customer: true },
-      omit: { password: true },
-    });
-
+    const user = await queryOne<User>('User', { eq: { id: userId } });
     if (!user) {
       throw new Error('User not found');
     }
-
-    return user;
+    const { password, ...userWithoutPassword } = user;
+    return userWithoutPassword;
   },
 
   async updateProfile(userId: string, data: Partial<RegisterData>) {
-    const user = await prisma.user.update({
-      where: { id: userId },
-      data: {
-        firstName: data.firstName,
-        lastName: data.lastName,
-        phone: data.phone,
-      },
-      omit: { password: true },
+    const user = await update('User', userId, {
+      firstName: data.firstName,
+      lastName: data.lastName,
+      phone: data.phone,
     });
 
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'UPDATE',
-        entityType: 'User',
-        entityId: userId,
-        description: 'Profile updated',
-      },
+    await insert('AuditLog', {
+      userId,
+      action: 'UPDATE',
+      entityType: 'User',
+      entityId: userId,
+      description: 'Profile updated',
     });
 
     return user;
   },
 
   async changePassword(userId: string, currentPassword: string, newPassword: string) {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const user = await queryOne<User>('User', { eq: { id: userId } });
     if (!user) throw new Error('User not found');
 
     const isValid = await bcrypt.compare(currentPassword, user.password);
     if (!isValid) throw new Error('Current password is incorrect');
 
     const hashedPassword = await bcrypt.hash(newPassword, 12);
-    await prisma.user.update({
-      where: { id: userId },
-      data: { password: hashedPassword },
-    });
+    await update('User', userId, { password: hashedPassword });
+
+    // Send password change notification email
+    emailService.sendPasswordChangedEmail(user.email, user.firstName).catch(console.error);
 
     return { message: 'Password changed successfully' };
   },

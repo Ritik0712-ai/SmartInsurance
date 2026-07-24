@@ -1,244 +1,83 @@
-import prisma from '../config/prisma.js';
-import { Prisma } from '@prisma/client';
-
-interface PremiumFilters {
-  search?: string;
-  page?: number;
-  limit?: number;
-  sortBy?: string;
-  sortOrder?: 'asc' | 'desc';
-  policyId?: string;
-  customerId?: string;
-  status?: string;
-}
-
-interface CreatePremiumData {
-  policyId: string;
-  amount: Prisma.Decimal;
-  paymentDate: Date;
-  dueDate: Date;
-  paymentMethod: 'CASH' | 'BANK_TRANSFER' | 'UPI' | 'CARD' | 'CHEQUE' | 'ONLINE';
-  transactionRef?: string;
-  remarks?: string;
-}
-
-function generateReceiptNumber(): string {
-  const prefix = 'RCP';
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `${prefix}-${timestamp}-${random}`;
-}
+import { getSupabase } from '../config/database.js';
 
 export const premiumService = {
-  async getAll(filters: PremiumFilters) {
-    const {
-      search = '',
-      page = 1,
-      limit = 10,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      policyId,
-      customerId,
-      status,
-    } = filters;
+  async getAll(filters: any = {}) {
+    const { page = 1, limit = 10, status, policyId } = filters;
+    const supabase = getSupabase();
 
-    const skip = (page - 1) * limit;
+    let query = supabase
+      .from('PremiumPayment')
+      .select('*, policy:Policy(policyNumber, policyType, customer:Customer(user:User(firstName, lastName)))', { count: 'exact' });
 
-    const where: Prisma.PremiumPaymentWhereInput = {
-      ...(policyId && { policyId }),
-      ...(status && { status: status as any }),
-      ...(customerId && { policy: { customerId } }),
-      ...(search && {
-        OR: [
-          { receiptNumber: { contains: search, mode: 'insensitive' } },
-          { transactionRef: { contains: search, mode: 'insensitive' } },
-          { policy: { policyNumber: { contains: search, mode: 'insensitive' } } },
-        ],
-      }),
-    };
+    if (status) query = query.eq('status', status);
+    if (policyId) query = query.eq('policyId', policyId);
 
-    const [payments, total] = await Promise.all([
-      prisma.premiumPayment.findMany({
-        where,
-        include: {
-          policy: {
-            include: {
-              customer: {
-                include: {
-                  user: { select: { firstName: true, lastName: true, email: true } },
-                },
-              },
-            },
-          },
-        },
-        skip,
-        take: limit,
-        orderBy: { [sortBy]: sortOrder },
-      }),
-      prisma.premiumPayment.count({ where }),
-    ]);
+    const from = (page - 1) * limit;
+    query = query.range(from, from + limit - 1).order('paymentDate', { ascending: false });
+
+    const { data, error, count } = await query;
+    if (error) throw new Error(error.message);
 
     return {
-      data: payments,
+      data: data || [],
       pagination: {
         page,
         limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNext: page * limit < total,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / limit),
+        hasNext: page * limit < (count || 0),
         hasPrev: page > 1,
       },
     };
   },
 
   async getById(id: string) {
-    const payment = await prisma.premiumPayment.findUnique({
-      where: { id },
-      include: {
-        policy: {
-          include: {
-            customer: {
-              include: { user: { select: { firstName: true, lastName: true, email: true } } },
-            },
-          },
-        },
-      },
-    });
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('PremiumPayment')
+      .select('*, policy:Policy(policyNumber, customer:Customer(user:User(firstName, lastName))))')
+      .eq('id', id)
+      .single();
 
-    if (!payment) throw new Error('Payment not found');
-    return payment;
+    if (error) throw new Error('Payment not found');
+    return data;
   },
 
-  async create(data: CreatePremiumData, recordedById: string) {
-    const policy = await prisma.policy.findUnique({ where: { id: data.policyId } });
-    if (!policy) throw new Error('Policy not found');
+  async create(data: any) {
+    const supabase = getSupabase();
 
-    const receiptNumber = generateReceiptNumber();
+    const receiptNumber = `RCP-${Date.now().toString(36).toUpperCase()}`;
 
-    const payment = await prisma.premiumPayment.create({
-      data: {
+    const { data: payment, error } = await supabase
+      .from('PremiumPayment')
+      .insert({
         policyId: data.policyId,
         receiptNumber,
         amount: data.amount,
-        paymentDate: data.paymentDate,
+        paymentDate: data.paymentDate || new Date().toISOString(),
         dueDate: data.dueDate,
-        paymentMethod: data.paymentMethod,
-        transactionRef: data.transactionRef,
-        remarks: data.remarks,
         status: 'PAID',
-      },
-      include: {
-        policy: {
-          include: {
-            customer: {
-              include: { user: { select: { firstName: true, lastName: true } } },
-            },
-          },
-        },
-      },
-    });
+        paymentMethod: data.paymentMethod,
+        transactionRef: data.transactionRef || null,
+        remarks: data.remarks || null,
+      })
+      .select()
+      .single();
 
-    await prisma.auditLog.create({
-      data: {
-        userId: recordedById,
-        action: 'CREATE',
-        entityType: 'PremiumPayment',
-        entityId: payment.id,
-        description: `Premium payment ${receiptNumber} recorded`,
-      },
-    });
-
+    if (error) throw new Error(error.message);
     return payment;
   },
 
-  async updateStatus(id: string, status: string, updatedById: string) {
-    const existing = await prisma.premiumPayment.findUnique({ where: { id } });
-    if (!existing) throw new Error('Payment not found');
+  async updateStatus(id: string, status: string) {
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('PremiumPayment')
+      .update({ status })
+      .eq('id', id)
+      .select()
+      .single();
 
-    const payment = await prisma.premiumPayment.update({
-      where: { id },
-      data: { status: status as any },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: updatedById,
-        action: 'UPDATE',
-        entityType: 'PremiumPayment',
-        entityId: id,
-        description: `Payment ${payment.receiptNumber} status changed to ${status}`,
-      },
-    });
-
-    return payment;
-  },
-
-  async getOverduePayments() {
-    const today = new Date();
-    const overdue = await prisma.premiumPayment.findMany({
-      where: {
-        status: 'PENDING',
-        dueDate: { lt: today },
-      },
-      include: {
-        policy: {
-          include: {
-            customer: {
-              include: { user: { select: { firstName: true, lastName: true, email: true } } },
-            },
-          },
-        },
-      },
-      orderBy: { dueDate: 'asc' },
-    });
-
-    return overdue;
-  },
-
-  async getByPolicy(policyId: string) {
-    const payments = await prisma.premiumPayment.findMany({
-      where: { policyId },
-      orderBy: { paymentDate: 'desc' },
-    });
-
-    return payments;
-  },
-
-  async getByCustomer(customerId: string) {
-    const payments = await prisma.premiumPayment.findMany({
-      where: { policy: { customerId } },
-      include: {
-        policy: { select: { policyNumber: true, policyType: true } },
-      },
-      orderBy: { paymentDate: 'desc' },
-    });
-
-    return payments;
-  },
-
-  async getCollectionSummary(startDate?: Date, endDate?: Date) {
-    const where: Prisma.PremiumPaymentWhereInput = {
-      status: 'PAID',
-      ...(startDate && { paymentDate: { gte: startDate } }),
-      ...(endDate && { paymentDate: { lte: endDate } }),
-    };
-
-    const [payments, totalAmount] = await Promise.all([
-      prisma.premiumPayment.findMany({
-        where,
-        select: { amount: true, paymentDate: true, paymentMethod: true },
-      }),
-      prisma.premiumPayment.aggregate({
-        where,
-        _sum: { amount: true },
-        _count: true,
-      }),
-    ]);
-
-    return {
-      totalCollected: totalAmount._sum.amount || 0,
-      totalTransactions: totalAmount._count,
-      payments,
-    };
+    if (error) throw new Error(error.message);
+    return data;
   },
 };

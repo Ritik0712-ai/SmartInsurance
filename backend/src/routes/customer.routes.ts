@@ -1,44 +1,32 @@
 import { Router } from 'express';
-import { body, query } from 'express-validator';
-import { validate } from '../middlewares/validate.middleware.js';
 import { customerService } from '../services/customer.service.js';
 import { authenticate, authorize } from '../middlewares/auth.middleware.js';
 
 const router = Router();
 
-// Get all customers (Admin/Agent only)
-router.get(
-  '/',
-  authenticate,
-  authorize('ADMIN', 'AGENT'),
-  async (req, res) => {
-    try {
-      const filters = {
-        search: req.query.search as string,
-        page: parseInt(req.query.page as string) || 1,
-        limit: parseInt(req.query.limit as string) || 10,
-        sortBy: (req.query.sortBy as string) || 'createdAt',
-        sortOrder: (req.query.sortOrder as 'asc' | 'desc') || 'desc',
-      };
-
-      const result = await customerService.getAll(filters);
-      res.json({ success: true, data: result });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
+// Get all customers
+router.get('/', authenticate, authorize('ADMIN', 'AGENT'), async (req: any, res) => {
+  try {
+    const filters = {
+      search: req.query.search as string,
+      page: parseInt(req.query.page as string) || 1,
+      limit: parseInt(req.query.limit as string) || 10,
+    };
+    const result = await customerService.getAll(filters);
+    res.json({ success: true, data: result });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
   }
-);
+});
 
 // Get my profile as customer
 router.get('/me', authenticate, async (req: any, res) => {
   try {
-    const user = req.user;
-    if (user.role !== 'CUSTOMER') {
+    if (req.user.role !== 'CUSTOMER') {
       res.status(403).json({ success: false, error: 'Not a customer' });
       return;
     }
-
-    const customer = await customerService.getById(user.userId);
+    const customer = await customerService.getByUserId(req.user.userId);
     res.json({ success: true, data: customer });
   } catch (error: any) {
     res.status(404).json({ success: false, error: error.message });
@@ -55,47 +43,34 @@ router.get('/:id', authenticate, async (req: any, res) => {
   }
 });
 
-// Create customer (Admin/Agent only)
-router.post(
-  '/',
-  authenticate,
-  authorize('ADMIN', 'AGENT'),
-  validate([
-    body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 6 }),
-    body('firstName').trim().notEmpty(),
-    body('lastName').trim().notEmpty(),
-  ]),
-  async (req: any, res) => {
-    try {
-      const result = await customerService.create({
-        ...req.body,
-        createdById: req.user.userId,
-      });
-      res.status(201).json({ success: true, data: result });
-    } catch (error: any) {
-      res.status(400).json({ success: false, error: error.message });
-    }
+// Create customer
+router.post('/', authenticate, authorize('ADMIN', 'AGENT'), async (req: any, res) => {
+  try {
+    const data = { ...req.body, createdById: req.user.userId };
+    const customer = await customerService.create(data);
+    res.json({ success: true, data: customer });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
   }
-);
+});
 
 // Update customer
-router.put('/:id', authenticate, async (req: any, res) => {
+router.patch('/:id', authenticate, async (req: any, res) => {
   try {
     const customer = await customerService.update(req.params.id, req.body);
     res.json({ success: true, data: customer });
   } catch (error: any) {
-    res.status(400).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Delete customer (Admin only)
+// Delete customer
 router.delete('/:id', authenticate, authorize('ADMIN'), async (req: any, res) => {
   try {
-    const result = await customerService.delete(req.params.id, req.user.userId);
-    res.json({ success: true, data: result });
+    await customerService.delete(req.params.id, req.user.userId);
+    res.json({ success: true, message: 'Customer deleted successfully' });
   } catch (error: any) {
-    res.status(400).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

@@ -1,187 +1,117 @@
-import prisma from '../config/prisma.js';
-import { Prisma } from '@prisma/client';
+import { getSupabase } from '../config/database.js';
 
 export const dashboardService = {
   async getOverview() {
-    const [
-      totalCustomers,
-      activePolicies,
-      pendingClaims,
-      overduePayments,
-      recentPolicies,
-      recentClaims,
-    ] = await Promise.all([
-      // Total customers
-      prisma.customer.count(),
+    const supabase = getSupabase();
 
-      // Active policies
-      prisma.policy.count({ where: { status: 'ACTIVE' } }),
-
-      // Pending claims
-      prisma.claim.count({ where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } } }),
-
-      // Overdue payments
-      prisma.premiumPayment.count({
-        where: {
-          status: 'PENDING',
-          dueDate: { lt: new Date() },
-        },
-      }),
-
-      // Recent policies
-      prisma.policy.findMany({
-        take: 5,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          customer: {
-            include: { user: { select: { firstName: true, lastName: true } } },
-          },
-        },
-      }),
-
-      // Recent claims
-      prisma.claim.findMany({
-        take: 5,
-        orderBy: { submittedAt: 'desc' },
-        include: {
-          policy: {
-            include: {
-              customer: {
-                include: { user: { select: { firstName: true, lastName: true } } },
-              },
-            },
-          },
-        },
-      }),
+    const [customersResult, policiesResult, claimsResult, paymentsResult, recentPoliciesResult, recentClaimsResult] = await Promise.all([
+      supabase.from('Customer').select('*', { count: 'exact', head: true }),
+      supabase.from('Policy').select('*', { count: 'exact', head: true }).eq('status', 'ACTIVE'),
+      supabase.from('Claim').select('*', { count: 'exact', head: true }).in('status', ['SUBMITTED', 'UNDER_REVIEW']),
+      supabase.from('PremiumPayment').select('*', { count: 'exact', head: true }).eq('status', 'PENDING').lt('dueDate', new Date().toISOString()),
+      supabase.from('Policy').select('*, customer:Customer(id, userId, user:User(firstName, lastName))').order('createdAt', { ascending: false }).limit(5),
+      supabase.from('Claim').select('*, policy:Policy(policyNumber, customer:Customer(user:User(firstName, lastName)))').order('submittedAt', { ascending: false }).limit(5),
     ]);
 
     return {
       stats: {
-        totalCustomers,
-        activePolicies,
-        pendingClaims,
-        overduePayments,
+        totalCustomers: customersResult.count || 0,
+        activePolicies: policiesResult.count || 0,
+        pendingClaims: claimsResult.count || 0,
+        overduePayments: paymentsResult.count || 0,
       },
-      recentPolicies,
-      recentClaims,
+      recentPolicies: recentPoliciesResult.data || [],
+      recentClaims: recentClaimsResult.data || [],
     };
   },
 
   async getCustomerOverview(customerId: string) {
-    const [
-      policies,
-      claims,
-      documents,
-      totalSumAssured,
-      totalPremiumsPaid,
-    ] = await Promise.all([
-      prisma.policy.findMany({
-        where: { customerId },
-        orderBy: { createdAt: 'desc' },
-      }),
-      prisma.claim.findMany({
-        where: { policy: { customerId } },
-        orderBy: { submittedAt: 'desc' },
-      }),
-      prisma.document.findMany({
-        where: { customerId },
-        orderBy: { uploadedAt: 'desc' },
-      }),
-      prisma.policy.aggregate({
-        where: { customerId, status: 'ACTIVE' },
-        _sum: { sumAssured: true },
-      }),
-      prisma.premiumPayment.aggregate({
-        where: { policy: { customerId }, status: 'PAID' },
-        _sum: { amount: true },
-      }),
-    ]);
+    const supabase = getSupabase();
 
-    const activePolicies = policies.filter((p) => p.status === 'ACTIVE').length;
-    const pendingClaims = claims.filter((c) => c.status === 'SUBMITTED' || c.status === 'UNDER_REVIEW').length;
+    // Get customer details
+    const { data: customer } = await supabase
+      .from('Customer')
+      .select('*, user:User(firstName, lastName, email, phone)')
+      .eq('id', customerId)
+      .single();
+
+    // Get policies for this customer
+    const { data: policies } = await supabase
+      .from('Policy')
+      .select('*')
+      .eq('customerId', customerId)
+      .order('createdAt', { ascending: false });
+
+    // Get claims for policies belonging to this customer
+    const policyIds = policies?.map((p: any) => p.id) || [];
+    let claims: any[] = [];
+    if (policyIds.length > 0) {
+      const { data: claimData } = await supabase
+        .from('Claim')
+        .select('*, policy:Policy(policyNumber, policyType)')
+        .in('policyId', policyIds)
+        .order('submittedAt', { ascending: false });
+      claims = claimData || [];
+    }
+
+    // Get documents for this customer
+    const { data: documents } = await supabase
+      .from('Document')
+      .select('*')
+      .eq('customerId', customerId)
+      .order('uploadedAt', { ascending: false });
+
+    // Get premium payments for policies
+    let premiumPayments: any[] = [];
+    if (policyIds.length > 0) {
+      const { data: paymentData } = await supabase
+        .from('PremiumPayment')
+        .select('*')
+        .in('policyId', policyIds)
+        .order('paymentDate', { ascending: false });
+      premiumPayments = paymentData || [];
+    }
+
+    // Calculate totals
+    const totalSumAssured = policies?.reduce((sum: number, p: any) => sum + parseFloat(p.sumAssured || 0), 0) || 0;
+    const totalPremiumsPaid = premiumPayments
+      ?.filter((p: any) => p.status === 'PAID')
+      .reduce((sum: number, p: any) => sum + parseFloat(p.amount || 0), 0) || 0;
+    const activePoliciesCount = policies?.filter((p: any) => p.status === 'ACTIVE').length || 0;
+    const pendingClaimsCount = claims?.filter((c: any) => ['SUBMITTED', 'UNDER_REVIEW'].includes(c.status)).length || 0;
 
     return {
+      customer,
+      policies: policies || [],
+      claims: claims,
+      documents: documents || [],
+      premiumPayments,
       stats: {
-        totalPolicies: policies.length,
-        activePolicies,
+        totalPolicies: policies?.length || 0,
+        activePolicies: activePoliciesCount,
+        totalSumAssured,
+        totalPremiumsPaid,
         totalClaims: claims.length,
-        pendingClaims,
-        totalDocuments: documents.length,
-        totalSumAssured: totalSumAssured._sum.sumAssured || 0,
-        totalPremiumsPaid: totalPremiumsPaid._sum.amount || 0,
+        pendingClaims: pendingClaimsCount,
       },
-      policies,
-      claims,
-      documents,
     };
   },
 
-  async getRevenueData(startDate?: Date, endDate?: Date) {
-    const where: Prisma.PremiumPaymentWhereInput = {
-      status: 'PAID',
-      ...(startDate && { paymentDate: { gte: startDate } }),
-      ...(endDate && { paymentDate: { lte: endDate } }),
-    };
-
-    const payments = await prisma.premiumPayment.findMany({
-      where,
-      select: { amount: true, paymentDate: true },
-      orderBy: { paymentDate: 'asc' },
-    });
-
-    // Group by month
-    const monthlyData: Record<string, number> = {};
-    payments.forEach((p) => {
-      const month = p.paymentDate.toISOString().substring(0, 7);
-      monthlyData[month] = (monthlyData[month] || 0) + Number(p.amount);
-    });
-
-    return Object.entries(monthlyData).map(([month, amount]) => ({ month, amount }));
+  async getRevenueData() {
+    const supabase = getSupabase();
+    const { data } = await supabase.from('PremiumPayment').select('amount, paymentDate').order('paymentDate', { ascending: false }).limit(30);
+    return data || [];
   },
 
   async getPolicyDistribution() {
-    const policies = await prisma.policy.groupBy({
-      by: ['policyType'],
-      _count: true,
-      where: { status: 'ACTIVE' },
-    });
-
-    return policies.map((p) => ({
-      type: p.policyType,
-      count: p._count,
-    }));
+    const supabase = getSupabase();
+    const { data } = await supabase.from('Policy').select('policyType, status');
+    return data || [];
   },
 
-  async getClaimStatistics() {
-    const claims = await prisma.claim.groupBy({
-      by: ['status'],
-      _count: true,
-    });
-
-    return claims.map((c) => ({
-      status: c.status,
-      count: c._count,
-    }));
-  },
-
-  async getExpiringPolicies(daysAhead: number = 30) {
-    const futureDate = new Date();
-    futureDate.setDate(futureDate.getDate() + daysAhead);
-
-    return prisma.policy.findMany({
-      where: {
-        status: 'ACTIVE',
-        endDate: {
-          lte: futureDate,
-          gte: new Date(),
-        },
-      },
-      include: {
-        customer: {
-          include: { user: { select: { firstName: true, lastName: true, email: true } } },
-        },
-      },
-      orderBy: { endDate: 'asc' },
-    });
+  async getClaimsTrend() {
+    const supabase = getSupabase();
+    const { data } = await supabase.from('Claim').select('status, submittedAt').order('submittedAt', { ascending: false }).limit(30);
+    return data || [];
   },
 };

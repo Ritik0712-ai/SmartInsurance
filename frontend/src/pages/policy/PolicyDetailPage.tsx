@@ -6,7 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { formatCurrency, formatDate, getStatusColor } from '@/lib/utils';
-import { ArrowLeft, FileText, Calendar, DollarSign, RefreshCw } from 'lucide-react';
+import { ArrowLeft, FileText, Calendar, DollarSign, RefreshCw, Download } from 'lucide-react';
+import { pdfService } from '@/services/pdfService';
 
 export default function PolicyDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -16,6 +17,13 @@ export default function PolicyDetailPage() {
     queryFn: () => policyApi.getById(id!).then((res) => res.data.data),
     enabled: !!id,
   });
+
+  const handleDownloadPDF = () => {
+    if (policy) {
+      const doc = pdfService.generatePolicyPDF(policy, policy.customer?.user);
+      pdfService.downloadPDF(doc, `Policy-${policy.policyNumber}`);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -37,6 +45,7 @@ export default function PolicyDetailPage() {
             <Badge className={getStatusColor(policy.status)}>{policy.status}</Badge>
           </div>
         </div>
+        <Button onClick={handleDownloadPDF}><Download className="h-4 w-4 mr-2" />Download PDF</Button>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">

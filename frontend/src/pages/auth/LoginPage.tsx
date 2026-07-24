@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,7 @@ interface LoginForm {
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -26,8 +27,9 @@ export default function LoginPage() {
     setIsLoading(true);
     try {
       await login(data.email, data.password);
+      navigate('/dashboard');
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Login failed. Please try again.');
+      setError(err.response?.data?.error || err.message || 'Login failed. Please try again.');
     } finally {
       setIsLoading(false);
     }

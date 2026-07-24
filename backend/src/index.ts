@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import rateLimit from 'express-rate-limit';
 import { PrismaClient } from '@prisma/client';
 
 // Routes
@@ -13,11 +14,26 @@ import claimRoutes from './routes/claim.routes.js';
 import premiumRoutes from './routes/premium.routes.js';
 import documentRoutes from './routes/document.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
+import reportRoutes from './routes/report.routes.js';
+import calculatorRoutes from './routes/calculator.routes.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Rate limiting
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  message: { error: 'Too many requests, please try again later.' },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 login attempts per window
+  message: { error: 'Too many login attempts, please try again later.' },
+});
 
 // Middleware
 app.use(helmet());
@@ -28,6 +44,11 @@ app.use(cors({
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Apply rate limiting
+app.use('/api/', generalLimiter);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
 
 // Health check
 app.get('/health', (_, res) => {
@@ -42,6 +63,8 @@ app.use('/api/claims', claimRoutes);
 app.use('/api/premiums', premiumRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/calculator', calculatorRoutes);
 
 // 404 handler
 app.use((_, res) => {

@@ -1,199 +1,123 @@
-import prisma from '../config/prisma.js';
-import supabaseAdmin from '../config/supabase.js';
-import { Prisma } from '@prisma/client';
-
-interface DocumentFilters {
-  page?: number;
-  limit?: number;
-  sortBy?: string;
-  sortOrder?: 'asc' | 'desc';
-  customerId?: string;
-  documentType?: string;
-}
-
-interface UploadDocumentData {
-  customerId: string;
-  documentType: 'ID_PROOF' | 'ADDRESS_PROOF' | 'MEDICAL_REPORT' | 'CLAIM_DOCUMENT' | 'POLICY_DOCUMENT' | 'PHOTO' | 'SIGNATURE' | 'OTHER';
-  description?: string;
-  uploadedById: string;
-}
+import { getSupabase } from '../config/database.js';
+import { emailService } from './email.service.js';
 
 export const documentService = {
-  async upload(data: UploadDocumentData, file: Express.Multer.File) {
-    const customer = await prisma.customer.findUnique({ where: { id: data.customerId } });
-    if (!customer) throw new Error('Customer not found');
+  async getAll(filters: any = {}) {
+    const { page = 1, limit = 10, customerId, documentType } = filters;
+    const supabase = getSupabase();
 
-    // Upload to Supabase Storage
-    const fileExt = file.originalname.split('.').pop();
-    const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const storagePath = `documents/${data.customerId}/${fileName}`;
+    let query = supabase
+      .from('Document')
+      .select('*', { count: 'exact' });
 
-    const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
-      .from('insurance-documents')
-      .upload(storagePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false,
-      });
+    if (customerId) query = query.eq('customerId', customerId);
+    if (documentType) query = query.eq('documentType', documentType);
 
-    if (uploadError) {
-      throw new Error(`Failed to upload file: ${uploadError.message}`);
-    }
+    const from = (page - 1) * limit;
+    query = query.range(from, from + limit - 1).order('uploadedAt', { ascending: false });
 
-    // Get public URL
-    const { data: urlData } = supabaseAdmin.storage
-      .from('insurance-documents')
-      .getPublicUrl(storagePath);
-
-    // Save to database
-    const document = await prisma.document.create({
-      data: {
-        customerId: data.customerId,
-        fileName,
-        originalName: file.originalname,
-        fileType: fileExt || 'unknown',
-        fileSize: file.size,
-        mimeType: file.mimetype,
-        url: urlData.publicUrl,
-        storagePath,
-        documentType: data.documentType,
-        description: data.description,
-        uploadedById: data.uploadedById,
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: data.uploadedById,
-        action: 'CREATE',
-        entityType: 'Document',
-        entityId: document.id,
-        description: `Document ${file.originalname} uploaded`,
-      },
-    });
-
-    return document;
-  },
-
-  async getAll(filters: DocumentFilters) {
-    const {
-      page = 1,
-      limit = 10,
-      sortBy = 'uploadedAt',
-      sortOrder = 'desc',
-      customerId,
-      documentType,
-    } = filters;
-
-    const skip = (page - 1) * limit;
-
-    const where: Prisma.DocumentWhereInput = {
-      ...(customerId && { customerId }),
-      ...(documentType && { documentType: documentType as any }),
-    };
-
-    const [documents, total] = await Promise.all([
-      prisma.document.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { [sortBy]: sortOrder },
-      }),
-      prisma.document.count({ where }),
-    ]);
+    const { data, error, count } = await query;
+    if (error) throw new Error(error.message);
 
     return {
-      data: documents,
+      data: data || [],
       pagination: {
         page,
         limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNext: page * limit < total,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / limit),
+        hasNext: page * limit < (count || 0),
         hasPrev: page > 1,
       },
     };
   },
 
   async getById(id: string) {
-    const document = await prisma.document.findUnique({
-      where: { id },
-      include: {
-        customer: {
-          include: { user: { select: { firstName: true, lastName: true } } },
-        },
-      },
-    });
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('Document')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    if (!document) throw new Error('Document not found');
+    if (error) throw new Error('Document not found');
+    return data;
+  },
+
+  async create(data: any) {
+    const supabase = getSupabase();
+
+    const { data: document, error } = await supabase
+      .from('Document')
+      .insert({
+        customerId: data.customerId,
+        documentType: data.documentType,
+        fileName: data.fileName,
+        fileUrl: data.fileUrl || null,
+        fileSize: data.fileSize || null,
+        mimeType: data.mimeType || null,
+        description: data.description || null,
+        uploadedById: data.uploadedById,
+        verificationStatus: 'PENDING',
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
     return document;
   },
 
-  async getByCustomer(customerId: string) {
-    const documents = await prisma.document.findMany({
-      where: { customerId },
-      orderBy: { uploadedAt: 'desc' },
-    });
+  async verify(id: string, verifiedById: string, status: string) {
+    const supabase = getSupabase();
 
-    return documents;
-  },
+    const { data, error } = await supabase
+      .from('Document')
+      .update({
+        verificationStatus: status,
+        verifiedById,
+        verifiedAt: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .single();
 
-  async delete(id: string, deletedById: string) {
-    const document = await prisma.document.findUnique({ where: { id } });
-    if (!document) throw new Error('Document not found');
+    if (error) throw new Error(error.message);
 
-    // Delete from Supabase Storage
-    const { error: deleteError } = await supabaseAdmin.storage
-      .from('insurance-documents')
-      .remove([document.storagePath]);
+    // Send email notification if verified
+    if (status === 'VERIFIED') {
+      const { data: docWithCustomer } = await supabase
+        .from('Document')
+        .select('*, customer:Customer(user:User(email, firstName, lastName))')
+        .eq('id', id)
+        .single();
 
-    if (deleteError) {
-      console.error('Failed to delete file from storage:', deleteError);
+      const customerUser = (docWithCustomer as any)?.customer?.user;
+      const userEmail = Array.isArray(customerUser) ? customerUser[0]?.email : customerUser?.email;
+      const userName = Array.isArray(customerUser)
+        ? `${customerUser[0]?.firstName || ''} ${customerUser[0]?.lastName || ''}`.trim()
+        : `${customerUser?.firstName || ''} ${customerUser?.lastName || ''}`.trim();
+
+      if (userEmail) {
+        const documentTypeName = docWithCustomer?.documentType?.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()) || 'Document';
+
+        emailService.sendDocumentVerifiedEmail(
+          userEmail,
+          userName || 'Customer',
+          {
+            documentType: documentTypeName,
+            fileName: docWithCustomer?.fileName || 'Document',
+          }
+        ).catch(console.error);
+      }
     }
 
-    // Delete from database
-    await prisma.document.delete({ where: { id } });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: deletedById,
-        action: 'DELETE',
-        entityType: 'Document',
-        entityId: id,
-        description: `Document ${document.originalName} deleted`,
-      },
-    });
-
-    return { message: 'Document deleted successfully' };
+    return data;
   },
 
-  async verify(id: string, verifiedById: string) {
-    const document = await prisma.document.update({
-      where: { id },
-      data: { isVerified: true },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: verifiedById,
-        action: 'UPDATE',
-        entityType: 'Document',
-        entityId: id,
-        description: `Document ${document.originalName} verified`,
-      },
-    });
-
-    return document;
-  },
-
-  async getDownloadUrl(id: string) {
-    const document = await prisma.document.findUnique({ where: { id } });
-    if (!document) throw new Error('Document not found');
-
-    const result = await supabaseAdmin.storage
-      .from('insurance-documents')
-      .createSignedUrl(document.storagePath, 3600);
-
-    const data = result.data;
-    return { url: data?.signedUrl, expiresIn: 3600 };
+  async delete(id: string) {
+    const supabase = getSupabase();
+    const { error } = await supabase.from('Document').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+    return { success: true };
   },
 };

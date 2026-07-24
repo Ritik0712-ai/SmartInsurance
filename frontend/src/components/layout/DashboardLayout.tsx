@@ -14,6 +14,7 @@ import {
   X,
   Shield,
   ChevronDown,
+  Calculator,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -25,6 +26,7 @@ const navigation = [
   { name: 'Claims', href: '/claims', icon: FileCheck, roles: ['ADMIN', 'AGENT', 'CUSTOMER'] },
   { name: 'Premiums', href: '/premiums', icon: Receipt, roles: ['ADMIN', 'AGENT'] },
   { name: 'Documents', href: '/documents', icon: FolderOpen, roles: ['ADMIN', 'AGENT', 'CUSTOMER'] },
+  { name: 'Calculator', href: '/calculator', icon: Calculator, roles: ['ADMIN', 'AGENT', 'CUSTOMER'] },
   { name: 'Settings', href: '/settings', icon: Settings, roles: ['ADMIN', 'AGENT', 'CUSTOMER'] },
 ];
 

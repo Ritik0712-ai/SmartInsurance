@@ -1,22 +1,33 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { body } from 'express-validator';
-import { validate } from '../middlewares/validate.middleware.js';
 import { documentService } from '../services/document.service.js';
-import { authenticate, authorize } from '../middlewares/auth.middleware.js';
+import { storageService } from '../services/storage.service.js';
+import { authenticate } from '../middlewares/auth.middleware.js';
+import { getCustomerIdFromUserId } from '../utils/helpers.js';
 
 const router = Router();
 
-// Multer config for memory storage
+// Configure multer for memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
   fileFilter: (_, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+    const allowedTypes = [
+      'image/jpeg',
+      'image/png',
+      'image/gif',
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ];
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only JPEG, PNG, GIF, and PDF are allowed.'));
+      cb(new Error('Invalid file type'));
     }
   },
 });
@@ -24,18 +35,22 @@ const upload = multer({
 // Get all documents
 router.get('/', authenticate, async (req: any, res) => {
   try {
-    const filters = {
-      page: parseInt(req.query.page as string) || 1,
-      limit: parseInt(req.query.limit as string) || 10,
-      sortBy: (req.query.sortBy as string) || 'uploadedAt',
-      sortOrder: (req.query.sortOrder as 'asc' | 'desc') || 'desc',
-      customerId: req.query.customerId as string,
-      documentType: req.query.documentType as string,
-    };
+    const filters: any = { page: 1, limit: 10 };
+    if (req.query.page) filters.page = parseInt(req.query.page as string);
+    if (req.query.limit) filters.limit = parseInt(req.query.limit as string);
+    if (req.query.documentType) filters.documentType = req.query.documentType;
 
-    // Customers see only their documents
+    // For CUSTOMER role, convert userId to customerId
     if (req.user.role === 'CUSTOMER') {
-      filters.customerId = req.user.userId;
+      const customerId = await getCustomerIdFromUserId(req.user.userId);
+      if (!customerId) {
+        res.status(404).json({ success: false, error: 'Customer profile not found' });
+        return;
+      }
+      filters.customerId = customerId;
+    } else if (req.query.customerId) {
+      // ADMIN/AGENT can filter by customerId
+      filters.customerId = req.query.customerId;
     }
 
     const result = await documentService.getAll(filters);
@@ -45,87 +60,124 @@ router.get('/', authenticate, async (req: any, res) => {
   }
 });
 
-// Get my documents (customer)
-router.get('/my', authenticate, async (req: any, res) => {
-  try {
-    if (req.user.role !== 'CUSTOMER') {
-      res.status(403).json({ success: false, error: 'Not a customer' });
-      return;
-    }
-    const documents = await documentService.getByCustomer(req.user.userId);
-    res.json({ success: true, data: documents });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // Get document by ID
-router.get('/:id', authenticate, async (req, res) => {
+router.get('/:id', authenticate, async (req: any, res) => {
   try {
-    const document = await documentService.getById(req.params.id as string);
-    res.json({ success: true, data: document });
+    const doc = await documentService.getById(req.params.id);
+    res.json({ success: true, data: doc });
   } catch (error: any) {
     res.status(404).json({ success: false, error: error.message });
   }
 });
 
-// Upload document
-router.post(
-  '/',
-  authenticate,
-  upload.single('file'),
-  validate([
-    body('customerId').notEmpty(),
-    body('documentType').isIn([
-      'ID_PROOF', 'ADDRESS_PROOF', 'MEDICAL_REPORT',
-      'CLAIM_DOCUMENT', 'POLICY_DOCUMENT', 'PHOTO', 'SIGNATURE', 'OTHER',
-    ]),
-  ]),
-  async (req: any, res) => {
-    try {
-      if (!req.file) {
-        res.status(400).json({ success: false, error: 'No file uploaded' });
+// Upload document with file
+router.post('/', authenticate, upload.single('file'), async (req: any, res) => {
+  try {
+    const customerId = req.body.customerId;
+
+    // For CUSTOMER role, get their customerId
+    if (req.user.role === 'CUSTOMER') {
+      const custId = await getCustomerIdFromUserId(req.user.userId);
+      if (!custId) {
+        res.status(404).json({ success: false, error: 'Customer profile not found' });
         return;
       }
-
-      const document = await documentService.upload(
-        { ...req.body, uploadedById: req.user.userId },
-        req.file
-      );
-      res.status(201).json({ success: true, data: document });
-    } catch (error: any) {
-      res.status(400).json({ success: false, error: error.message });
+      // Override customerId with their own
+      req.body.customerId = custId;
     }
-  }
-);
 
-// Get download URL
-router.get('/:id/download', authenticate, async (req, res) => {
-  try {
-    const { url, expiresIn } = await documentService.getDownloadUrl(req.params.id as string);
-    res.json({ success: true, data: { url, expiresIn } });
+    if (!customerId && req.user.role === 'CUSTOMER') {
+      res.status(400).json({ success: false, error: 'Customer ID required' });
+      return;
+    }
+
+    let fileUrl = null;
+
+    // Upload file to Supabase Storage if file provided
+    if (req.file) {
+      const uploadResult = await storageService.uploadDocument(
+        req.file.buffer,
+        req.file.originalname,
+        req.body.customerId
+      );
+      fileUrl = uploadResult.url;
+    }
+
+    const doc = await documentService.create({
+      customerId: req.body.customerId,
+      documentType: req.body.documentType,
+      fileName: req.file?.originalname || req.body.fileName,
+      fileUrl: fileUrl,
+      fileSize: req.file?.size || parseInt(req.body.fileSize) || null,
+      mimeType: req.file?.mimetype || req.body.mimeType,
+      description: req.body.description,
+      uploadedById: req.user.userId,
+    });
+
+    res.json({ success: true, data: doc });
   } catch (error: any) {
-    res.status(400).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Verify document (Admin/Agent)
-router.patch('/:id/verify', authenticate, authorize('ADMIN', 'AGENT'), async (req: any, res) => {
+// Verify document
+router.patch('/:id/verify', authenticate, async (req: any, res) => {
   try {
-    const document = await documentService.verify(req.params.id, req.user.userId);
-    res.json({ success: true, data: document });
+    const doc = await documentService.verify(req.params.id, req.user.userId, req.body.status);
+    res.json({ success: true, data: doc });
   } catch (error: any) {
-    res.status(400).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Delete document (Admin/Agent)
-router.delete('/:id', authenticate, authorize('ADMIN', 'AGENT'), async (req: any, res) => {
+// Delete document
+router.delete('/:id', authenticate, async (req: any, res) => {
   try {
-    const result = await documentService.delete(req.params.id, req.user.userId);
-    res.json({ success: true, data: result });
+    // Get document to check if it has a file
+    const doc = await documentService.getById(req.params.id);
+
+    // Delete file from storage if exists
+    if (doc.fileUrl) {
+      try {
+        // Extract path from URL (simplified - in production use proper URL parsing)
+        const urlParts = doc.fileUrl.split('/documents/');
+        if (urlParts.length > 1) {
+          await storageService.deleteDocument(urlParts[1]);
+        }
+      } catch {
+        // Continue even if file deletion fails
+        console.error('Failed to delete file from storage');
+      }
+    }
+
+    await documentService.delete(req.params.id);
+    res.json({ success: true, message: 'Document deleted' });
   } catch (error: any) {
-    res.status(400).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get document download URL
+router.get('/:id/download', authenticate, async (req: any, res) => {
+  try {
+    const doc = await documentService.getById(req.params.id);
+
+    if (!doc.fileUrl) {
+      res.status(404).json({ success: false, error: 'No file associated with this document' });
+      return;
+    }
+
+    // For public buckets, return the URL directly
+    // For private buckets, generate a signed URL
+    res.json({
+      success: true,
+      data: {
+        url: doc.fileUrl,
+        fileName: doc.fileName,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

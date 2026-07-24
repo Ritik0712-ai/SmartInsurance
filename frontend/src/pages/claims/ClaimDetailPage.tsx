@@ -6,7 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { formatCurrency, formatDate, getStatusColor } from '@/lib/utils';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Download } from 'lucide-react';
+import { pdfService } from '@/services/pdfService';
 
 export default function ClaimDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -17,17 +18,27 @@ export default function ClaimDetailPage() {
     enabled: !!id,
   });
 
+  const handleDownloadPDF = () => {
+    if (claim) {
+      const doc = pdfService.generateClaimPDF(claim, claim.policy);
+      pdfService.downloadPDF(doc, `Claim-${claim.claimNumber}`);
+    }
+  };
+
   if (isLoading) return <div className="flex items-center justify-center h-64"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>;
   if (!claim) return <div>Claim not found</div>;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" asChild><Link to="/claims"><ArrowLeft className="h-4 w-4 mr-2" />Back</Link></Button>
-        <div>
-          <h1 className="text-2xl font-bold">{claim.claimNumber}</h1>
-          <Badge className={getStatusColor(claim.status)}>{claim.status}</Badge>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" asChild><Link to="/claims"><ArrowLeft className="h-4 w-4 mr-2" />Back</Link></Button>
+          <div>
+            <h1 className="text-2xl font-bold">{claim.claimNumber}</h1>
+            <Badge className={getStatusColor(claim.status)}>{claim.status}</Badge>
+          </div>
         </div>
+        <Button onClick={handleDownloadPDF}><Download className="h-4 w-4 mr-2" />Download PDF</Button>
       </div>
 
       <Card>

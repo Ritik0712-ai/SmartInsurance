@@ -1,134 +1,70 @@
-import prisma from '../config/prisma.js';
-import { Prisma } from '@prisma/client';
-import { Decimal } from '@prisma/client/runtime/library';
+import { getSupabase } from '../config/database.js';
+import { emailService } from './email.service.js';
 
 interface PolicyFilters {
   search?: string;
   page?: number;
   limit?: number;
-  sortBy?: string;
-  sortOrder?: 'asc' | 'desc';
-  customerId?: string;
   status?: string;
+  customerId?: string;
   issuedById?: string;
-}
-
-interface CreatePolicyData {
-  customerId: string;
-  policyType: string;
-  sumAssured: Prisma.Decimal;
-  premiumAmount: Prisma.Decimal;
-  premiumFrequency?: string;
-  startDate: Date;
-  endDate: Date;
-  tenureYears: number;
-  description?: string;
-  issuedById: string;
-}
-
-function generatePolicyNumber(): string {
-  const prefix = 'POL';
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `${prefix}-${timestamp}-${random}`;
 }
 
 export const policyService = {
   async getAll(filters: PolicyFilters) {
-    const {
-      search = '',
-      page = 1,
-      limit = 10,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      customerId,
-      status,
-      issuedById,
-    } = filters;
+    const { page = 1, limit = 10, search = '', status, customerId, issuedById } = filters;
+    const supabase = getSupabase();
 
-    const skip = (page - 1) * limit;
+    let query = supabase
+      .from('Policy')
+      .select('*, customer:Customer(id, userId, user:User(firstName, lastName))', { count: 'exact' });
 
-    const where: Prisma.PolicyWhereInput = {
-      ...(customerId && { customerId }),
-      ...(status && { status: status as any }),
-      ...(issuedById && { issuedById }),
-      ...(search && {
-        OR: [
-          { policyNumber: { contains: search, mode: 'insensitive' } },
-          { policyType: { contains: search, mode: 'insensitive' } },
-          { customer: { user: { firstName: { contains: search, mode: 'insensitive' } } } },
-          { customer: { user: { lastName: { contains: search, mode: 'insensitive' } } } },
-        ],
-      }),
-    };
+    if (status) query = query.eq('status', status);
+    if (customerId) query = query.eq('customerId', customerId);
+    if (issuedById) query = query.eq('issuedById', issuedById);
+    if (search) {
+      query = query.or(`policyNumber.ilike.%${search}%,policyType.ilike.%${search}%`);
+    }
 
-    const [policies, total] = await Promise.all([
-      prisma.policy.findMany({
-        where,
-        include: {
-          customer: {
-            include: {
-              user: {
-                select: { firstName: true, lastName: true, email: true },
-              },
-            },
-          },
-          _count: {
-            select: { claims: true, premiumPayments: true },
-          },
-        },
-        skip,
-        take: limit,
-        orderBy: { [sortBy]: sortOrder },
-      }),
-      prisma.policy.count({ where }),
-    ]);
+    const from = (page - 1) * limit;
+    query = query.range(from, from + limit - 1).order('createdAt', { ascending: false });
+
+    const { data, error, count } = await query;
+    if (error) throw new Error(error.message);
 
     return {
-      data: policies,
+      data: data || [],
       pagination: {
         page,
         limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNext: page * limit < total,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / limit),
+        hasNext: page * limit < (count || 0),
         hasPrev: page > 1,
       },
     };
   },
 
   async getById(id: string) {
-    const policy = await prisma.policy.findUnique({
-      where: { id },
-      include: {
-        customer: {
-          include: {
-            user: {
-              select: { id: true, firstName: true, lastName: true, email: true },
-            },
-          },
-        },
-        claims: {
-          orderBy: { submittedAt: 'desc' },
-        },
-        premiumPayments: {
-          orderBy: { paymentDate: 'desc' },
-        },
-      },
-    });
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('Policy')
+      .select('*, customer:Customer(id, userId, user:User(firstName, lastName, email)), claims(*), premiumPayments(*)')
+      .eq('id', id)
+      .single();
 
-    if (!policy) throw new Error('Policy not found');
-    return policy;
+    if (error) throw new Error('Policy not found');
+    return data;
   },
 
-  async create(data: CreatePolicyData) {
-    const customer = await prisma.customer.findUnique({ where: { id: data.customerId } });
-    if (!customer) throw new Error('Customer not found');
+  async create(data: any, issuedById: string) {
+    const supabase = getSupabase();
 
-    const policyNumber = generatePolicyNumber();
+    const policyNumber = `POL-${Date.now().toString(36).toUpperCase()}`;
 
-    const policy = await prisma.policy.create({
-      data: {
+    const { data: policy, error } = await supabase
+      .from('Policy')
+      .insert({
         customerId: data.customerId,
         policyNumber,
         policyType: data.policyType,
@@ -138,171 +74,100 @@ export const policyService = {
         startDate: data.startDate,
         endDate: data.endDate,
         tenureYears: data.tenureYears,
-        status: 'ACTIVE',
-        description: data.description,
-        issuedById: data.issuedById,
-      },
-      include: {
-        customer: {
-          include: {
-            user: {
-              select: { firstName: true, lastName: true, email: true },
-            },
-          },
-        },
-      },
+        status: data.status || 'PENDING',
+        description: data.description || null,
+        issuedById,
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    await supabase.from('AuditLog').insert({
+      userId: issuedById,
+      action: 'CREATE',
+      entityType: 'Policy',
+      entityId: policy.id,
+      description: `Policy ${policyNumber} created`,
     });
 
-    await prisma.auditLog.create({
-      data: {
-        userId: data.issuedById,
-        action: 'CREATE',
-        entityType: 'Policy',
-        entityId: policy.id,
-        description: `Policy ${policyNumber} created`,
-      },
-    });
+    // Send policy created email to customer
+    const { data: customer } = await supabase
+      .from('Customer')
+      .select('*, user:User(email, firstName, lastName)')
+      .eq('id', data.customerId)
+      .single();
+
+    if (customer?.user) {
+      const formatCurrency = (amount: number) =>
+        new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
+
+      emailService.sendPolicyCreatedEmail(
+        customer.user.email,
+        `${customer.user.firstName} ${customer.user.lastName}`,
+        {
+          policyNumber,
+          policyType: data.policyType,
+          sumAssured: formatCurrency(data.sumAssured),
+          premiumAmount: formatCurrency(data.premiumAmount),
+          startDate: new Date(data.startDate).toLocaleDateString('en-IN'),
+          endDate: new Date(data.endDate).toLocaleDateString('en-IN'),
+        }
+      ).catch(console.error);
+    }
 
     return policy;
   },
 
-  async update(id: string, data: Partial<CreatePolicyData>, updatedById: string) {
-    const existing = await prisma.policy.findUnique({ where: { id } });
-    if (!existing) throw new Error('Policy not found');
+  async update(id: string, data: any) {
+    const supabase = getSupabase();
+    const { data: policy, error } = await supabase
+      .from('Policy')
+      .update(data)
+      .eq('id', id)
+      .select()
+      .single();
 
-    const policy = await prisma.policy.update({
-      where: { id },
-      data: {
-        policyType: data.policyType,
-        sumAssured: data.sumAssured,
-        premiumAmount: data.premiumAmount,
-        premiumFrequency: data.premiumFrequency,
-        startDate: data.startDate,
-        endDate: data.endDate,
-        tenureYears: data.tenureYears,
-        description: data.description,
-      },
-      include: {
-        customer: {
-          include: {
-            user: { select: { firstName: true, lastName: true } },
-          },
-        },
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: updatedById,
-        action: 'UPDATE',
-        entityType: 'Policy',
-        entityId: id,
-        description: `Policy ${policy.policyNumber} updated`,
-      },
-    });
-
+    if (error) throw new Error(error.message);
     return policy;
   },
 
-  async updateStatus(id: string, status: string, updatedById: string) {
-    const existing = await prisma.policy.findUnique({ where: { id } });
-    if (!existing) throw new Error('Policy not found');
+  async updateStatus(id: string, status: string) {
+    const supabase = getSupabase();
+    const { data: policy, error } = await supabase
+      .from('Policy')
+      .update({ status })
+      .eq('id', id)
+      .select()
+      .single();
 
-    const policy = await prisma.policy.update({
-      where: { id },
-      data: { status: status as any },
-      include: {
-        customer: {
-          include: { user: { select: { firstName: true, lastName: true } } },
-        },
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: updatedById,
-        action: 'UPDATE',
-        entityType: 'Policy',
-        entityId: id,
-        description: `Policy ${policy.policyNumber} status changed to ${status}`,
-      },
-    });
-
+    if (error) throw new Error(error.message);
     return policy;
   },
 
-  async renew(id: string, newEndDate: Date, newTenure: number, renewedById: string) {
-    const existing = await prisma.policy.findUnique({ where: { id } });
-    if (!existing) throw new Error('Policy not found');
+  async renew(id: string, newEndDate: string, newTenure: number) {
+    const supabase = getSupabase();
+    const { data: policy, error } = await supabase
+      .from('Policy')
+      .update({ endDate: newEndDate, tenureYears: newTenure, status: 'RENEWED' })
+      .eq('id', id)
+      .select()
+      .single();
 
-    const newStartDate = existing.endDate;
-    const policy = await prisma.policy.update({
-      where: { id },
-      data: {
-        startDate: newStartDate,
-        endDate: newEndDate,
-        tenureYears: newTenure,
-        status: 'RENEWED',
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: renewedById,
-        action: 'UPDATE',
-        entityType: 'Policy',
-        entityId: id,
-        description: `Policy ${policy.policyNumber} renewed`,
-      },
-    });
-
+    if (error) throw new Error(error.message);
     return policy;
   },
 
-  async cancel(id: string, cancelledById: string, reason?: string) {
-    const existing = await prisma.policy.findUnique({ where: { id } });
-    if (!existing) throw new Error('Policy not found');
+  async cancel(id: string, reason?: string) {
+    const supabase = getSupabase();
+    const { data: policy, error } = await supabase
+      .from('Policy')
+      .update({ status: 'CANCELLED', description: reason || 'Cancelled by user' })
+      .eq('id', id)
+      .select()
+      .single();
 
-    const policy = await prisma.policy.update({
-      where: { id },
-      data: { status: 'CANCELLED' },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        userId: cancelledById,
-        action: 'UPDATE',
-        entityType: 'Policy',
-        entityId: id,
-        description: `Policy ${policy.policyNumber} cancelled${reason ? `: ${reason}` : ''}`,
-      },
-    });
-
+    if (error) throw new Error(error.message);
     return policy;
-  },
-
-  async getExpiringPolicies(daysAhead: number = 30) {
-    const futureDate = new Date();
-    futureDate.setDate(futureDate.getDate() + daysAhead);
-
-    const policies = await prisma.policy.findMany({
-      where: {
-        status: 'ACTIVE',
-        endDate: {
-          lte: futureDate,
-          gte: new Date(),
-        },
-      },
-      include: {
-        customer: {
-          include: {
-            user: { select: { firstName: true, lastName: true, email: true } },
-          },
-        },
-      },
-      orderBy: { endDate: 'asc' },
-    });
-
-    return policies;
   },
 };

@@ -24,6 +24,7 @@ import PremiumListPage from './pages/premium/PremiumListPage';
 import PremiumCreatePage from './pages/premium/PremiumCreatePage';
 import DocumentListPage from './pages/document/DocumentListPage';
 import ProfilePage from './pages/settings/ProfilePage';
+import PremiumCalculatorPage from './pages/calculator/PremiumCalculatorPage';
 
 function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode; allowedRoles?: string[] }) {
   const { user, isLoading } = useAuth();
@@ -95,6 +96,9 @@ function App() {
 
         {/* Documents */}
         <Route path="/documents" element={<DocumentListPage />} />
+
+        {/* Calculator */}
+        <Route path="/calculator" element={<PremiumCalculatorPage />} />
 
         {/* Settings */}
         <Route path="/settings" element={<ProfilePage />} />
